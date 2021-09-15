@@ -1,0 +1,323 @@
+---
+title: "Demographics and Anatomy"
+output: github_document
+
+---
+
+```{r include = FALSE, message = FALSE, warning = FALSE}
+library(recount3)
+library(tidyverse)
+library(ggrepel)
+library(patchwork)
+library(gridExtra)
+library(ggridges)
+
+`%not in%` <- Negate(`%in%`)
+```
+
+# 1. Download the data
+
+```{r message = FALSE, warning = FALSE}
+rse_gene <- 
+  create_rse(
+    subset(
+      available_projects(),
+      project == "HNSC" & project_type == "data_sources"
+    )
+  )
+```
+
+# 2. Create dataframe with metadata
+
+```{r}
+sample_sheet <-
+  colData(rse_gene) %>%
+  data.frame() %>%
+  rownames_to_column("sample_id")
+
+sample_sheet %>% select(c(1:4)) %>% 
+  head(n = 3)
+```
+```{r echo=FALSE}
+paste0("Number of columns in metadata: ", ncol(sample_sheet))
+```
+
+
+Check if two columns with sample types are matching
+
+```{r}
+all(sample_sheet[, "tcga.cgc_sample_sample_type"] == sample_sheet[, "tcga.gdc_cases.samples.sample_type"])
+```
+# 3. Data frame for demographic info (+anatomic part and sample type)
+```{r}
+demo <- sample_sheet %>% 
+            select(contains("patient_barcode"), 
+                   ends_with("xml_anatomic_neoplasm_subdivision"), 
+                   contains(c(".sample_type", "demographic")), 
+                   -contains("sample_type_id")) %>% 
+  rename_with(~ gsub(".*\\.", "", .x)) %>% 
+  rename(patient_barcode = xml_bcr_patient_barcode,
+         anatomic_part = xml_anatomic_neoplasm_subdivision)
+
+head(demo %>% select(c(1:3)), 4)
+```
+```{r echo=FALSE}
+cat(paste("All included columns:", paste(1:ncol(demo), colnames(demo), sep = ". ", collapse = "\n"), sep = "\n\n"))
+```
+
+
+
+## Duplicated patients
+```{r echo=FALSE}
+dupl_pat <- demo %>% group_by(patient_barcode) %>% 
+                              summarise(count = n(),
+                                        sample_type = paste(unique(sort(sample_type)),
+                                                      collapse = ", ")) %>% 
+                              filter(count > 1)
+
+paste0("Number of duplicated barcodes: ", nrow(dupl_pat))
+```
+
+```{r echo=FALSE}
+paste0("Total number of patients: ", nrow(demo))
+paste0("Number of unique patients: ", nrow(demo %>% distinct(patient_barcode, .keep_all = TRUE)))
+```
+
+# 4. Plots
+
+## Functions for plotting:
+
+```{r message = FALSE, warning = FALSE}
+freq_table <- function(df, var, distinct = FALSE) {
+  
+  if (distinct == TRUE) {
+    df <- df %>% distinct(patient_barcode, .keep_all = TRUE)
+  }
+  dt <- table(df[, var]) %>% as.data.frame() %>% 
+    mutate(prop = Freq / sum(.$Freq) * 100) %>% 
+    arrange(desc(prop))
+  
+  dt[which(dt == 'not reported'), 1] <- NA 
+  dt[, 1] <- factor(dt[, 1], levels = dt[, 1][order(dt$Freq)])
+  
+  return(dt)
+  
+}
+```
+
+```{r message = FALSE, warning = FALSE}
+pie_chart <- function(freq, title, label = title) {
+  
+  ggplot(freq, aes(x = "", y = Freq, fill = Var1)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  geom_text_repel(aes(label = paste0(round(prop, 2), "%")), 
+                  position = position_stack(vjust=0.5), color = "black", size = 4) +
+  ggtitle(title) +
+  theme(plot.title = element_text(hjust = 0.5, size = 22)) +
+  labs(fill = label)
+}
+```
+
+```{r message = FALSE, warning = FALSE}
+plot_hist <- function(freq, title, label = title) {
+  
+  ggplot(freq, aes(x = Var1, y = Freq)) +
+  geom_bar(aes(fill = Var1), stat = 'identity') +
+  ggtitle(title) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, size = 22),
+        legend.position = 'none',
+        axis.title.x = element_blank()) +
+  labs(fill = label) +
+  scale_fill_discrete(na.value = "grey70")
+  
+}
+```
+
+```{r message = FALSE, warning = FALSE}
+anatomy_plot <- function(df, parts, dem) {
+  
+  df[df == "not reported"] <- NA
+  df <- df[, c("anatomic_part", dem), drop = F] %>% 
+    filter(anatomic_part %in% parts) %>% 
+    gather(key = "Demographics", value = "Group", -anatomic_part) %>% 
+    group_by(anatomic_part, Demographics, Group) %>% 
+    summarise(count = n(), .groups = "drop") %>% as.data.frame()
+
+  ggplot(df %>% filter(Demographics == dem), aes(x = Group, y = count)) +
+              geom_bar(aes(fill = Group), stat = "identity") +
+              geom_label(aes(x = Group, y = count, label = count),
+                              size = 3) +
+              facet_wrap(. ~ anatomic_part, ncol = 3) +
+      ggtitle(str_to_title(dem)) +
+      labs(fill = dem) +
+      theme_bw() +
+      theme(axis.text.x=element_blank(),
+            axis.ticks.x=element_blank(),
+            legend.position = "bottom",
+            plot.title = element_text(hjust = 0.5, size = 22))
+}
+
+```
+
+```{r message = FALSE, warning = FALSE}
+anatomy_plot_2 <- function(df, parts, dem) {
+  
+  df[df == "not reported"] <- NA
+  df <- df[, c("anatomic_part", dem), drop = F] %>% 
+    filter(anatomic_part %in% parts) %>% 
+    gather(key = "Demographics", value = "Group", -anatomic_part) %>% 
+    group_by(anatomic_part, Demographics, Group) %>% 
+    summarise(count = n(), .groups = "drop") %>% as.data.frame() %>% ungroup()
+  
+  ggplot(df %>% filter(Demographics == dem), aes(x = Group, y = count)) +
+              geom_bar(aes(fill = anatomic_part), color = "black", 
+                       stat = "identity", position = "dodge") +
+              geom_label(aes(label = count),
+                              size = 3, position = position_dodge2(width = 0.9) ) +
+      ggtitle(str_to_title(dem)) +
+      labs(fill = dem) +
+      theme_bw() +
+      theme(legend.position = "bottom",
+            plot.title = element_text(hjust = 0.5, size = 22)) +
+      scale_fill_brewer(palette = "Set3")
+}
+```
+
+## 1) Gender / Race / Ethnicity
+
+```{r}
+gender <- pie_chart(freq_table(demo, c("gender"), T), "Gender")
+race <- pie_chart(freq_table(demo, c("race"), T), "Race")
+ethn <- pie_chart(freq_table(demo, c("ethnicity"), T), "Ethnicity")
+
+gender
+race + scale_fill_brewer(palette = "Set2", na.value = "grey70")
+ethn + scale_fill_brewer(palette = "Dark2", na.value = "grey70")
+```
+
+
+
+```{r}
+gender_h <- plot_hist(freq_table(demo, "gender", T), "Gender", "Gender")
+race_h <- plot_hist(freq_table(demo, "race", T), "Race", "Race")
+ethn_h <- plot_hist(freq_table(demo, "ethnicity", T), "Ethnicity", "Ethnicity")
+
+gender_h
+race_h
+ethn_h
+```
+
+
+
+## 2) Anatomic features
+
+```{r message = FALSE, warning = FALSE}
+anat <- pie_chart(freq_table(demo, "anatomic_part"), "Anatomy")
+anat_h <- plot_hist(freq_table(demo, "anatomic_part"), "Anatomy", "Part of the body")
+```
+
+```{r}
+anat
+anat_h + theme(axis.text.x = element_text(angle = 15))+
+  geom_label(data = (demo %>% 
+                      group_by(anatomic_part) %>% 
+                      summarise(count = n())),
+            aes(x = anatomic_part, y = count, label = count),
+            size = 3)
+```
+
+## 3) Anatomic part + Gender/Race/Ethnicity 
+
+#### Examples: 1st version
+```{r}
+anatomy_plot(demo, c("Oral Cavity"), c("gender"))
+```
+
+```{r}
+anatomy_plot(demo, c("Oral Tongue", "Larynx", "Tonsil"), c("race"))
+```
+
+
+```{r}
+anatomy_plot(demo, c("Oral Tongue", "Larynx", "Tonsil", "Oral Cavity"), c("ethnicity"))
+```
+
+
+#### Examples: 2nd version
+```{r}
+anatomy_plot_2(demo, c("Oral Tongue", "Larynx", "Tonsil"), c("ethnicity"))
+```
+
+```{r}
+anatomy_plot_2(demo, c("Oral Tongue", "Larynx", "Tonsil", "Hypopharynx"), c("gender"))
+```
+
+## 4) Age (Year of birth)
+
+```{r}
+summary(demo$year_of_birth)
+```
+
+```{r}
+ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE), aes(x = year_of_birth)) +
+  geom_histogram(binwidth = 5, color = "black", fill = "lightskyblue1") +
+  theme_bw() +
+  ggtitle("Year of birth") +
+  theme(plot.title = element_text(hjust = 0.5, size = 22))
+```
+
+#### Examples: 1 anatomical feature
+
+```{r}
+ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE) %>% 
+           filter(anatomic_part == "Oral Tongue"), aes(x = year_of_birth)) +
+  geom_histogram(binwidth = 5, color = "black", fill = "antiquewhite1") +
+  theme_bw() +
+  ggtitle(paste0("Anatomic part: ", "Oral Tongue")) +
+  theme(plot.title = element_text(hjust = 0.5, size = 22))
+```
+
+```{r}
+ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE) %>% 
+           filter(anatomic_part == "Tonsil"), aes(x = year_of_birth)) +
+  geom_histogram(binwidth = 5, color = "black", fill = "antiquewhite1") +
+  theme_bw() +
+  ggtitle(paste0("Anatomic part: ", "Tonsil")) +
+  theme(plot.title = element_text(hjust = 0.5, size = 22))
+```
+
+#### Examples: several anatomival features
+```{r}
+ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE) %>% 
+           filter(anatomic_part %in% c("Oral Tongue", "Larynx", "Tonsil")), 
+         aes(x = year_of_birth, y = anatomic_part, fill = anatomic_part)) +
+  geom_density_ridges(scale = 2, alpha=0.5) + theme_ridges() +
+  scale_fill_brewer(palette = "Set3") +
+  scale_y_discrete(expand = c(0.8, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  theme(legend.position = "bottom",
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.title = element_blank())
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
