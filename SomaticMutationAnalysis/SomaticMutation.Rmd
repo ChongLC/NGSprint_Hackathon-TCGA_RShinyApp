@@ -1,0 +1,150 @@
+---
+title: "NGSPRINT_Hackathon"
+author: "Li Chuin Chong"
+date: "9/13/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+`%not in%` <- Negate(`%in%`)
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+
+needed_packages <- 
+  c("recount3", "maftools", "DESeq2", "TCGAbiolinks")
+
+for (pkg in needed_packages) {
+  if (pkg %not in% rownames(installed.packages())) {
+    print(paste("Trying to install", pkg))
+    BiocManager::install(pkg)
+    if ((pkg %not in% rownames(installed.packages()))) {
+      msg <- paste("ERROR: Unsuccessful!", pkg, "not installed!",
+                   "Check the log and try installing the package manually.")
+      stop(msg)
+    } 
+  }
+  library(pkg, character.only = TRUE)
+  ifelse(pkg %in% loadedNamespaces(), 
+         print(paste("Successful!", pkg, "loaded.")),
+         print(paste("ERROR: Unsuccessful!", pkg, 
+                     "not loaded. Check error msg.")))
+}
+```
+
+# Load all packages
+
+```{r}
+# to look at the data
+library(tidyverse)
+# to visualize the mutation data
+library(maftools)
+# to create heatmaps
+library(ComplexHeatmap)
+
+scale2 <- function(mat, ...) {
+  t(scale(t(mat), ...))
+}
+```
+
+# Somatic mutations
+
+```{r}
+tryCatch(maf <- tcgaLoad(study = "HNSC"), 
+         error = function(e) {
+           print(paste(rep("#", 50), collapse = ""))
+           print(paste0("# ERROR! Read the message below!", 
+                        paste(rep(" ", 17), collapse = ""),
+                        "#"))
+           print(paste(rep("#", 50), collapse = ""))
+           print(e)
+           print(paste("If you're seeing this message you probably don't have",
+                       "maftools package loaded, or have an older version.", 
+                       "This function is available with v2.8.",
+                       "Install the new version of maftools package with",
+                       "`BiocManager::install('PoisonAlien/maftools')`", 
+                       "and try again!"))
+           })
+
+```
+
+## Plot MAF summary
+
+```{r}
+plotmafSummary(maf = maf, rmOutlier = TRUE, 
+               addStat = 'median', dashboard = TRUE, log_scale = FALSE)
+```
+
+## Draw oncoplot for top ten mutated genes
+
+```{r}
+oncoplot(maf = maf, top = 10)
+```
+
+## Transition and tranversion
+
+```{r}
+maf.titv = titv(maf = maf, plot = FALSE, useSyn = TRUE)
+
+#plot titv summary
+plotTiTv(res = maf.titv)
+
+```
+
+## Lollipop plots for amino acid changes
+
+```{r}
+top_label <-
+  maf@data %>%
+  filter(Hugo_Symbol == "TP53") %>%
+  group_by(HGVSp_Short) %>%
+  summarise(count = n()) %>%
+  top_n(5) %>%
+  pull(HGVSp_Short) %>%
+  str_extract("[0-9]+")
+
+lollipopPlot(maf, gene = 'TP53',labelPos = top_label, labPosAngle = 10, labPosSize = 1.0, legendTxtSize = 1.0, titleSize = c(1.5, 1.2))
+#lollipopPlot(maf, "PIK3CA", labelPos = 'all') #just play around with interested mutated gene
+```
+
+```{r}
+lollipopPlot(maf, "TP53", labelPos = 'all')
+```
+## Mutation load against TCGA cohorts
+
+```{r}
+maf.mutload = tcgaCompare(maf = maf, cohortName = 'Example-HNSC', logscale = TRUE, capture_size = 50)
+```
+
+## Plot Variant Allele Frequencies (VAF)
+
+```{r}
+#plotVaf(maf = maf, vafCol = '??')
+```
+
+## Somatic Interactions
+
+```{r}
+somaticInteractions(maf, top = 15, pvalue = c(0.01, 0.05))
+```
+
+## Drug-Gene Interactions
+
+```{r}
+dgi = drugInteractions(maf = maf, fontSize = 0.75)
+TP53.dgi = drugInteractions(genes = "TP53", drugs = TRUE)
+TP53.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+```
+
+## Oncogenic Signaling Pathways
+
+```{r}
+OncogenicPathways(maf=maf)
+PlotOncogenicPathways(maf = maf, pathways = "TP53")
+#Tumor suppressor genes are in red, and oncogenes are in blue font.
+```
+
+
+
+
