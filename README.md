@@ -1,4 +1,4 @@
-# NGSPRINT_Hackathon-TCGA_RShinyApp
+# NGSprint_Hackathon-TCGA_RShinyApp
 
 ## Objective
 Develop an interative application for visualisation on TCGA dataset
