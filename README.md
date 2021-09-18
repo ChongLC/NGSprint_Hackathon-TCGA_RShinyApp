@@ -11,8 +11,8 @@ Describe TCGA dataset:-
 * gene expression - are there clearly visible patterns in gene expression? How does the expression of the highly mutated genes look like?
 
 ## Team members
-* Evgenia 
-* Leo Chen
+* Evgenia Chikina, ITMO University, Russia 
+* [Yin-Cheng Chen](https://github.com/YinchengChen23), Chang Gung University, Taiwan
 * [Li Chuin Chong](https://www.linkedin.com/in/lichuinchong/), Bezmialem Vakif University, Turkey
 * Carlolofang
 * Shao Ting 
