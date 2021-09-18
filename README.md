@@ -10,9 +10,12 @@ Describe TCGA dataset:-
 * somatic mutation analysis - what are the most frequently mutated genes? what are the common mutations?
 * gene expression - are there clearly visible patterns in gene expression? How does the expression of the highly mutated genes look like?
 
+## Facilitator
+* [Kasia Kedzierska](https://github.com/kzkedzierska), University of Oxford, UK
+
 ## Team members
 * Evgenia Chikina, ITMO University, Russia 
 * [Yin-Cheng Chen](https://github.com/YinchengChen23), Chang Gung University, Taiwan
 * [Li Chuin Chong](https://www.linkedin.com/in/lichuinchong/), Bezmialem Vakif University, Turkey
-* Carlolofang
-* Shao Ting 
+* Yan-Han Fang, National Cheng Kung University, Taiwan
+* Shao-Ting Lin, National Cheng Kung University, Taiwan
