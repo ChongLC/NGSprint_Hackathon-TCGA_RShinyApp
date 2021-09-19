@@ -10,6 +10,9 @@ Describe TCGA dataset:-
 * somatic mutation analysis - what are the most frequently mutated genes? what are the common mutations?
 * gene expression - are there clearly visible patterns in gene expression? How does the expression of the highly mutated genes look like?
 
+## Selected cancer type
+Head and Neck Squamous Cell Carcinoma (HNSC)
+
 ## Facilitator
 * [Kasia Kedzierska](https://github.com/kzkedzierska), University of Oxford, UK
 
