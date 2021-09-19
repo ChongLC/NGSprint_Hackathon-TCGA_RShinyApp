@@ -9,4 +9,4 @@ Herein, our input file was directly loaded from BiocManager.
 * MD file: knitted RMarkdown file containing all the results.
 
 ## Respective published dashboard
-http://t2jje9-li0chuin-chong.shinyapps.io/HNSC_dashboard_Chong/
+https://lichuin-chong.shinyapps.io/HNSC_dashboard_Chong/
