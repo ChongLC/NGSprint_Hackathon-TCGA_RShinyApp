@@ -1,0 +1,1205 @@
+---
+title: "HNSC"
+output: 
+  flexdashboard::flex_dashboard:
+     orientation: rows
+  
+runtime: shiny_prerendered
+---
+
+```{r setup, context = "setup"}
+options(repos = BiocManager::repositories())
+
+library(shiny)
+library(flexdashboard)
+library(recount3)
+library(TCGAbiolinks)
+library(tidyverse)
+library(ggrepel)
+library(patchwork)
+library(gridExtra)
+library(ggridges)
+library(survival)
+library(survminer)
+library(maftools)
+library(ggfortify)
+
+library(CancerSubtypes)
+library(DESeq2)
+library(ComplexHeatmap)
+library(DT)
+library(circlize)
+library(matrixStats)
+library(patchwork)
+library(RColorBrewer)
+library(rstatix)
+```
+
+```{r setup2, context = "setup"}
+`%not in%` <- Negate(`%in%`)
+
+freq_table <- function(df, var, distinct = FALSE) {
+  
+  if (distinct == TRUE) {
+    df <- df %>% distinct(patient_barcode, .keep_all = TRUE)
+  }
+  dt <- table(df[, var]) %>% as.data.frame() %>% 
+    mutate(prop = Freq / sum(.$Freq) * 100) %>% 
+    arrange(desc(prop))
+  
+  dt[which(dt == 'not reported'), 1] <- NA 
+  dt[, 1] <- factor(dt[, 1], levels = dt[, 1][order(dt$Freq)])
+  
+  return(dt)
+  
+}
+
+pie_chart <- function(freq, title, label = title) {
+  
+  ggplot(freq, aes(x = "", y = Freq, fill = Var1)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) +
+  theme_void() +
+  ggtitle("Percents, %") +
+  geom_text_repel(data = subset(freq, Freq >= 4),
+                  aes(label = paste0(round(prop, 2), "%")), 
+                  position = position_stack(vjust=0.5), color = "black", size = 4) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank()) +
+  labs(fill = label) +
+  guides(fill=guide_legend(ncol=1, byrow=TRUE))
+  
+  
+}
+
+plot_hist <- function(freq, title, label = title) {
+  
+  ggplot(freq, aes(x = Var1, y = Freq)) +
+  geom_bar(aes(fill = Var1), stat = 'identity') +
+  xlab(label) +
+  theme_bw() +
+  ggtitle("Total counts") +
+  theme(legend.position = 'none',
+        #axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(fill = label) +
+  scale_fill_discrete(na.value = "grey70")
+  
+}
+
+anatomy_plot_2 <- function(df, parts, dem) {
+  
+  df[df == "not reported"] <- NA
+  df <- df[, c("anatomic_part", dem), drop = F] %>% 
+    filter(anatomic_part %in% parts) %>% 
+    gather(key = "Demographics", value = "Group", -anatomic_part) %>% 
+    group_by(anatomic_part, Demographics, Group) %>% 
+    summarise(count = n(), .groups = "drop") %>% as.data.frame() %>% ungroup()
+  
+  ggplot(df %>% filter(Demographics == dem), aes(x = Group, y = count)) +
+              geom_bar(aes(fill = anatomic_part), color = "black", 
+                       stat = "identity", position = "dodge") +
+              geom_label(aes(label = count),
+                              size = 3, position = position_dodge2(width = 0.9, preserve = 'single') ) +
+      labs(fill = dem) +
+      theme_bw() +
+      theme(legend.position = "bottom",
+            axis.title.x=element_blank(),
+            legend.title= element_blank()) +
+      scale_fill_brewer(palette = "Set3") +
+  scale_x_discrete(guide = guide_axis(n.dodge=2))
+}
+```
+
+```{r  message = FALSE, warning = FALSE, context = "data"}
+rse_gene <- 
+  create_rse(
+    subset(
+      available_projects(),
+      project == "HNSC" & project_type == "data_sources"
+    )
+  )
+```
+
+```{r  message = FALSE, warning = FALSE, context = "data"}
+sample_sheet <-
+  colData(rse_gene) %>%
+  data.frame() %>%
+  rownames_to_column("sample_id")
+sample_sheet$vital_status <- ifelse(sample_sheet$tcga.xml_vital_status == "Dead",1,2)
+sample_sheet$tcga.xml_tobacco_smoking_history <- as.character(sample_sheet$tcga.xml_tobacco_smoking_history)
+smoking <- sample_sheet$tcga.xml_tobacco_smoking_history
+sample_sheet$tcga.xml_tobacco_smoking_history[smoking == "1"] <- "Non-smoker" 
+sample_sheet$tcga.xml_tobacco_smoking_history[smoking %in% c(2,5)] <- "Smoker" 
+sample_sheet$tcga.xml_tobacco_smoking_history[smoking %in% c(3,4)] <- "Reformed"
+```
+
+```{r  message = FALSE, warning = FALSE, context = "data"}
+sample_sheet_dup <- sample_sheet[!duplicated(sample_sheet$tcga.gdc_cases.diagnoses.diagnosis_id),]
+sample_sheet_dup$tcga.xml_days_to_death[is.na(sample_sheet_dup$tcga.xml_days_to_death)] <-
+  sample_sheet_dup$tcga.xml_days_to_last_followup[is.na(sample_sheet_dup$tcga.xml_days_to_death)]
+clinical <- sample_sheet_dup
+colnames(clinical)[colnames(clinical) == "tcga.xml_days_to_death"] = "days_to_death"
+rm(sample_sheet_dup)
+
+maf <- maftools::tcgaLoad(study = "HNSC")
+maf_clinical <- maf@clinical.data
+colnames(maf_clinical)[colnames(maf_clinical) == "bcr_patient_uuid"] = "tcga.gdc_cases.case_id"
+maf_clinical <- maf_clinical[,c("tcga.gdc_cases.case_id", "person_neoplasm_cancer_status")]
+clinical_maf <- merge(clinical,maf_clinical,by="tcga.gdc_cases.case_id")
+
+tcga_subtype_data <-
+  TCGAquery_subtype(tumor = "HNSC")
+colnames(tcga_subtype_data)[1] <- "tcga.cgc_case_id"
+tcga_subtype_data <- tcga_subtype_data[,c("tcga.cgc_case_id","RNA")]
+clinical_maf <- merge(clinical_maf,tcga_subtype_data,by="tcga.cgc_case_id")
+clinical_maf$RNA <- as.character(clinical_maf$RNA)
+```
+
+```{r message = FALSE, warning = FALSE, include = F, context = "data"}
+assayNames(rse_gene)
+
+assay(rse_gene, "counts") <- 
+  transform_counts(rse_gene)
+
+normalized_counts <- 
+  vst(assays(rse_gene)$counts)
+
+row_var <-
+  rowVars(normalized_counts)
+
+data1 <- FSbyVar(normalized_counts, cut.type="topk",value=500)
+pca <-prcomp(t(data1),center = TRUE,scale. = F)
+pcavars <- (pca$sdev)^2
+pcaprops <- pcavars / sum(pcavars)
+
+top2_pca.data <- data.frame(pca$x[, 1:2])
+
+load("NMF_cluster.RData")
+# if in window maybe try to load("C:/Users/user/NMF_cluster.rdata")
+selectK <- function(input_k){
+  if(input_k == "NMF_3"){
+    NMF_result = CNMF_3
+    } else if (input_k == "NMF_4"){
+      NMF_result = CNMF_4
+    } else if (input_k == "NMF_5"){
+      NMF_result = CNMF_5
+    } else if (input_k == "NMF_6"){
+      NMF_result = CNMF_6
+    } else if (input_k == "NMF_7"){
+      NMF_result = CNMF_7
+    } else if (input_k == "NMF_8"){
+      NMF_result = CNMF_8
+    } else if (input_k == "NMF_9"){
+      NMF_result = CNMF_9
+    } else if (input_k == "NMF_10"){
+      NMF_result = CNMF_10
+    }
+  return(NMF_result)
+}
+```
+
+```{r  message = FALSE, warning = FALSE, context = "setup"}
+ANOVA_f <- function(meta_group, factor_vec){
+	F_test <- data.frame()
+    F_test[1,1:2] <- 1
+    colnames(F_test) <- c("var","p.value")
+    for(i in 1:ncol(meta_group)){
+    	temp <- data.frame(value = meta_group[,i], group = factor_vec)
+        temp$group <- factor(temp$group)
+        res <- unlist(summary(aov(value~ group, data = temp)))
+        F_test <- rbind(F_test, c(colnames(meta_group)[i],unlist(res)[9]))
+    }
+    F_test <- F_test[!is.na(F_test$p.value),]
+    F_test <- F_test[F_test$p.value < 0.05,]
+  return(F_test)
+}
+
+Welch_ANOVA_f <- function(meta_group, factor_vec){
+	F_test <- data.frame()
+    for(i in 1:ncol(meta_group)){
+    	temp <- data.frame(value = meta_group[,i], group = factor_vec)
+        temp$group <- factor(temp$group)
+        res <- data.frame(welch_anova_test(value~ group, data = temp))
+        F_test <- rbind(F_test, res)
+    }
+    F_test$var <- colnames(meta_group)
+    F_test <- F_test[!is.na(F_test$p),]
+    F_test <- F_test[F_test$p < 0.05,]
+	F_test <- F_test[,c("var","p")]
+	colnames(F_test) <- c("var","p.value")
+  	return(F_test)
+}
+
+Kruskal_Wallis_h <- function(meta_group, factor_vec){
+	pval <- c()
+    for(i in 1:ncol(meta_group)){
+    	temp <- data.frame(value = meta_group[,i], group = factor_vec)
+        temp$group <- factor(temp$group)
+        res <- kruskal.test(value~ group, data = temp)
+        pval <- c(pval, res$p.value)
+    }
+    H_test <- data.frame(var = colnames(meta_group), p.value = pval)
+  	H_test <- H_test[!is.na(H_test$p.value), ]
+  	H_test <- H_test[H_test$p.value < 0.05, ]
+  	return(H_test)
+}
+
+
+post_hoc_Games <- function(meta_group, F_test, adjp, pcut, factor_vec){
+  post_test <- data.frame()
+  if(nrow(F_test)==0){ return(post_test)}
+  meta_group <- meta_group[,F_test$var]
+  post_test <- data.frame()
+  for(i in 1:ncol(meta_group)){
+    tempdf <- data.frame(value = meta_group[,i], group = factor_vec)
+    tagvalue <- c()
+    for(x in unique(tempdf$group)){
+      tagvalue <- c(tagvalue, mean(tempdf$value[tempdf$group == x]))
+    }
+    win <- unique(tempdf$group)[tagvalue == max(tagvalue)]
+    tempdf$group <- factor(tempdf$group)
+    tempdf <- data.frame(games_howell_test(value ~ group, data=tempdf))
+    tempdf <- tempdf[,2:7]
+    tempdf$winner <- win
+    tempdf$variable <- colnames(meta_group)[i]
+    tempdf$compair <- paste0(tempdf$group1, "-", tempdf$group2)
+    post_test <- rbind(post_test, tempdf)
+  }
+  post_test <- post_test[!is.na(post_test$p.adj), ]
+  post_test <- post_test[,c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")]
+  keep <- unique(post_test$variable[post_test$p.adj < pcut])
+  keep <- unique(post_test$variable[post_test$p.adj < pcut])
+  if(length(keep)  == 0){
+    post_test <- data.frame()
+    post_test[1,1:7] <- 0
+    colnames(post_test) <- c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")
+    return(post_test)
+  }
+  post_test <- post_test[post_test$variable %in% keep, ]
+  return(post_test)
+}
+
+post_hoc_Tukey <- function(meta_group, F_test, adjp, pcut, factor_vec){
+  post_test <- data.frame()
+  if(nrow(F_test)==0){ return(post_test)}
+  meta_group <- meta_group[,F_test$var]
+  post_test <- data.frame()
+  for(i in 1:ncol(meta_group)){
+    tempdf <- data.frame(value = meta_group[,i], group = factor_vec)
+    tagvalue <- c()
+    for(x in unique(tempdf$group)){
+      tagvalue <- c(tagvalue, mean(tempdf$value[tempdf$group == x]))
+    }
+    win <- unique(tempdf$group)[tagvalue == max(tagvalue)]
+    tempdf$group <- factor(tempdf$group)
+    tempdf <- data.frame(tukey_hsd(tempdf, value ~ group, detailed = T))
+    tempdf <- tempdf[,2:8]
+    tempdf$winner <- win
+    tempdf$variable <- colnames(meta_group)[i]
+    tempdf$compair <- paste0(tempdf$group1, "-", tempdf$group2)
+    post_test <- rbind(post_test, tempdf)
+  }
+  post_test <- post_test[,c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")]
+  keep <- unique(post_test$variable[post_test$p.adj < pcut])
+  keep <- unique(post_test$variable[post_test$p.adj < pcut])
+  if(length(keep)  == 0){
+    post_test <- data.frame()
+    post_test[1,1:7] <- 0
+    colnames(post_test) <- c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")
+    return(post_test)
+  }
+  post_test <- post_test[post_test$variable %in% keep, ]
+  return(post_test)
+}
+
+post_hoc_Mann_Whitney <- function(meta_group, H_test, adjp, pcut, factor_vec){
+  post_test <- data.frame()
+  if(nrow(H_test)==0){ return(post_test) }
+  meta_group <- meta_group[,H_test$var]
+  post_test <- data.frame()
+  post_test[1,1:7] <- 0
+  colnames(post_test) <- c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")
+  count <- 1
+  for(i in 1:ncol(meta_group)){
+    tempdf <- data.frame(value = meta_group[,i], group = factor_vec)
+    factor_list <- unique(tempdf$group)
+    tagvalue <- c()
+    for(x in factor_list){
+      tagvalue <- c(tagvalue, mean(tempdf$value[tempdf$group == x]))
+    }
+    win <- factor_list[tagvalue == max(tagvalue)]
+    for(x in 1:(length(factor_list)-1)){
+      m = x + 1
+      for(y in m:length(factor_list)){
+        res <- wilcox.test(tempdf$value[tempdf$group == factor_list[x]],
+                           tempdf$value[tempdf$group == factor_list[y]], exact=F, conf.int=T)
+        post_test[count,1] <- colnames(meta_group)[i]
+        post_test[count,2] <- paste0(c(factor_list[x], factor_list[y]), collapse = "-")
+        post_test[count,3] <- res$estimate
+        post_test[count,4] <- res$conf.int[1]
+        post_test[count,5] <- res$conf.int[2]
+        post_test[count,6] <- res$p.value
+        post_test[count,7] <- win
+        count = count + 1
+      }
+    }
+  }
+  keep <- unique(post_test$variable[post_test$p.adj < pcut])
+  if(length(keep)  == 0){
+    post_test <- data.frame()
+    post_test[1,1:7] <- 0
+    colnames(post_test) <- c("variable","compair","estimate","conf.low","conf.high","p.adj","winner")
+    return(post_test)
+  }
+  post_test <- post_test[post_test$variable %in% keep, ]
+  return(post_test)
+}
+
+plot_3bar_moregroup <- function(post_test, meta_group, factor_vec, metagenome){
+  if(nrow(post_test) == 0){
+    return(ggplot())
+  }
+  horder <- hclust(dist(scale(t(metagenome[,unique(post_test$variable)]), center=TRUE, scale=TRUE) ), method = "ward.D")
+  horder <- horder$labels[horder$order]
+  abun.bartable <- data.frame()
+  abun.bartable[1,1:4] <- 0
+  colnames(abun.bartable) <- c("variable","group","mean","sd")
+  count <- 1
+  for(x in unique(post_test$variable)){
+    for(y in unique(factor_vec)){
+      abun.bartable[count,1] <- x
+      abun.bartable[count,2] <- y
+      temp <- data.frame(value = metagenome[,colnames(metagenome) == x], group = factor_vec)
+      abun.bartable[count,3] <- mean(temp$value[temp$group == y])
+      abun.bartable[count,4] <- sd(temp$value[temp$group == y])
+      count <- count + 1
+    }
+  }
+  abun.bartable$variable <- factor(abun.bartable$variable, levels = horder)
+  abun.bartable$group <- factor(abun.bartable$group, levels = sort(unique(abun.bartable$group)))
+  p1 <- ggplot(abun.bartable, aes(variable, mean, fill = group)) +
+    scale_x_discrete(limits = levels(abun.bartable$variable)) +
+    coord_flip() + xlab("") + ylab("Mean proportion (%)") +
+    theme(panel.background = element_rect(fill = 'transparent'),
+          panel.grid = element_blank(),
+          axis.ticks.length = unit(0.4,"lines"),
+          axis.ticks = element_line(color='black'),
+          axis.line = element_line(colour = "black"),
+          axis.title.x=element_text(colour='black', size=12,face = "bold"),
+          axis.text=element_text(colour='black',size=10,face = "bold"),
+          legend.title=element_blank(),
+          legend.text=element_text(size=12,face = "bold",colour = "black",margin = margin(r = 20)),
+          legend.position = "top",
+          legend.direction = "horizontal",
+          legend.key.width = unit(0.8,"cm"),
+          legend.key.height = unit(0.5,"cm"))
+  for (i in 1:(nrow(abun.bartable)/length(unique(factor_vec)) - 1)){
+    p1 <- p1 + annotate('rect', xmin = i+0.5, xmax = i+1.5, ymin = -Inf, ymax = Inf,
+                        fill = ifelse(i %% 2 == 0, 'white', 'gray95'))
+  }
+  
+  p1 <- p1 + geom_bar(stat = "identity",position = "dodge",width = 0.7,colour = "black") +
+    scale_fill_brewer(palette = "Paired") +
+    geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2, position=position_dodge(.9))
+  post_test$cforder <- paste0(post_test$variable, post_test$compair)
+  post_test$sig <- ifelse(post_test$p.adj < 0.05, post_test$winner, "NS")
+  fillist <- c()
+  for(i in 1:length(unique(abun.bartable$group))){
+    fillist <- c(fillist, brewer.pal(length(unique(abun.bartable$group)), "Paired")[i])
+  }
+  fillist <- c(fillist, "black")
+  names(fillist) = c(sort(unique(factor_vec)),"NS")
+  post_test$variable <- factor(post_test$variable, levels = horder)
+  p2 <- ggplot(post_test,aes(variable, estimate, fill = sig, group= compair)) +
+    theme(panel.background = element_rect(fill = 'transparent'),
+          panel.grid = element_blank(),
+          axis.ticks.length = unit(0.4,"lines"),
+          axis.ticks = element_line(color='black'),
+          axis.line = element_line(colour = "black"),
+          axis.title.x=element_text(colour='black', size=12,face = "bold"),
+          axis.text=element_text(colour='black',size=10,face = "bold"),
+          axis.text.y = element_blank(),
+          legend.position = "top",
+          axis.line.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.direction = "horizontal",
+          legend.key.width = unit(0.8,"cm"),
+          legend.key.height = unit(0.5,"cm"),
+          legend.text=element_text(size=12,face = "bold",colour = "black",margin = margin(r = 20)),
+          plot.title = element_text(size = 15,face = "bold",colour = "black",hjust = 0.5)) +
+    scale_x_discrete(limits = levels(post_test$variable)) + coord_flip() +
+    xlab("") + ylab("Difference in mean proportions (%)") + labs(title="95% confidence intervals")
+  for (i in 1:(nrow(post_test)/choose(length(unique(factor_vec)),2) - 1)){
+    p2 <- p2 + annotate('rect', xmin = i+0.5, xmax = i+1.5, ymin = -Inf, ymax = Inf,
+                        fill = ifelse(i %% 2 == 0, 'white', 'gray95'))
+  }
+  p2 <- p2 +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                  position = position_dodge(0.9), width = 0.5, size = 0.5) +
+    geom_point(shape = 21,size = 3,position = position_dodge(0.9)) +
+    scale_fill_manual(values = fillist)   +
+    geom_hline(aes(yintercept = 0), linetype = 'dashed', color = 'black') +
+    geom_text(aes(x =  variable, y = -Inf, group = cforder),label = post_test$compair, 
+              hjust = 0,fontface = "bold",inherit.aes = FALSE,size = 3, angle = 30,
+              position = position_dodge(0.9))
+  p <- p1 + p2 + plot_layout(widths = c(4,6,2))
+  return(p)
+}
+```
+
+```{r  message = FALSE, warning = FALSE, context = "data"}
+demo <- sample_sheet %>% 
+            select(contains("patient_barcode"), 
+                   ends_with("xml_anatomic_neoplasm_subdivision"), 
+                   contains(c(".sample_type", "demographic")), 
+                   -contains("sample_type_id")) %>% 
+  rename_with(~ gsub(".*\\.", "", .x)) %>% 
+  rename(patient_barcode = xml_bcr_patient_barcode,
+         anatomic_part = xml_anatomic_neoplasm_subdivision)
+```
+
+
+
+```{r message = FALSE, warning = FALSE}
+gender <- pie_chart(freq_table(demo, c("gender"), T), "Gender")
+race <- pie_chart(freq_table(demo, c("race"), T), "Race")
+ethn <- pie_chart(freq_table(demo, c("ethnicity"), T), "Ethnicity")
+```
+
+```{r message = FALSE, warning = FALSE}
+gender_h <- plot_hist(freq_table(demo, "gender", T), "gender", "Gender")
+race_h <- plot_hist(freq_table(demo, "race", T), "race", "Race")
+ethn_h <- plot_hist(freq_table(demo, "ethnicity", T), "ethnicity", "Ethnicity")
+```
+
+What is HNSC? 
+=====================================
+
+Row {width = 12}
+-----------------
+
+```{r}
+mainPanel(
+  h1(strong("Head and neck cancer regions")),
+  img(src='https://www.cancer.gov/sites/g/files/xnrzdm211/files/styles/cgov_article/public/cgov_image/media_image/2019-09/head-and-neck-cancer-regions-diagram.jpg?h=b6e7030b&itok=LlisaGTY', align = "middle",
+      height = 400, width = 500),
+  p("Credit: Terese Winslow")
+  )
+
+```
+
+
+Column {.tabset}
+-----------------
+
+
+```{r}
+mainPanel(
+  p("\n"),
+  h1(strong("What are cancers of the head and neck?")),
+  p("Cancers that are known collectively as head and neck cancers usually begin in the squamous cells that line the mucosal surfaces of the head and neck (for example, those inside the mouth, throat, and voice box). These cancers are referred to as squamous cell carcinomas of the head and neck. Head and neck cancers can also begin in the salivary glands, sinuses, or muscles or nerves in the head and neck, but these types of cancer are much less common than squamous cell carcinomas."),
+  p("https://www.cancer.gov/types/head-and-neck/head-neck-fact-sheet#what-are-cancers-of-the-head-and-neck")
+  )
+```
+
+Demographics 
+===================================== 
+
+Row {width = 4}
+-----------------
+
+### Gender 
+```{r}
+gender + gender_h
+```
+
+### Race
+```{r}
+(race + scale_fill_brewer(palette = "Set2", na.value = "grey70")) | (race_h + scale_fill_brewer(palette = "Set2"))
+```
+
+### Ethnicity
+```{r}
+(ethn + scale_fill_brewer(palette = "Dark2", na.value = "grey70")) | (ethn_h + scale_fill_brewer(palette = "Dark2"))
+```
+
+Row {width = 6}
+--------------
+
+```{r, context = "data"}
+anat <- pie_chart(freq_table(demo, "anatomic_part"), "Anatomy")
+anat_h <- plot_hist(freq_table(demo, "anatomic_part"), "Anatomy", "Part of the body")
+```
+
+
+### Year of birth
+```{r}
+ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE), aes(x = year_of_birth)) +
+  geom_histogram(binwidth = 5, color = "black", fill = "lightskyblue1") +
+  theme_bw() +
+  xlab("Year of birth")
+```
+
+### Anatomic localisation
+```{r}
+anat_h + theme(axis.text.x = element_text(angle = 15))+
+  geom_label(data = (demo %>% 
+                      group_by(anatomic_part) %>% 
+                      summarise(count = n())),
+            aes(x = anatomic_part, y = count, label = count),
+            size = 3)
+```
+
+
+
+
+
+Anatomy {}
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+### Age 
+
+```{r}
+selectInput(
+  inputId = "tumor",
+  "Choose anatomic localisation of tumor:",
+  unique(demo$anatomic_part)
+  )
+
+sliderInput(
+  "binw", 
+  "Width of Bins", 
+  min = 1, max = 20, value = 5
+  )
+```
+
+### Anatomy
+```{r}
+checkboxGroupInput(
+  inputId = "anat2",
+  "Choose anatomic part:",
+  unique(demo$anatomic_part),
+  selected = c("Oral Cavity", "Larynx")
+  )
+
+```
+
+
+Row {.tabset}
+---------------------
+
+### Age by tumor
+```{r}
+plotOutput("hist_age")
+```
+
+```{r age_hist, context = "server"}
+output$hist_age <- renderPlot({
+  ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE) %>% 
+           filter(anatomic_part == input$tumor), aes(x = year_of_birth)) +
+  geom_histogram(binwidth = input$binw, color = "black", fill = "antiquewhite1") +
+  theme_bw() +
+  ggtitle(paste0("Anatomic part: ", input$tumor)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Year of birth")
+    })
+```
+
+### Multiple
+
+```{r}
+plotOutput("hist_age_all")
+```
+
+```{r age_hist_all, context = "server"}
+output$hist_age_all <- renderPlot({
+  ggplot(demo %>% distinct(patient_barcode, .keep_all = TRUE) %>% 
+           filter(anatomic_part %in% input$anat2), 
+         aes(x = year_of_birth, y = anatomic_part, fill = anatomic_part)) +
+  geom_density_ridges(scale = 2, alpha=0.5) + theme_ridges() +
+  scale_fill_brewer(palette = "Set3") +
+  scale_y_discrete(expand = c(0.8, 0)) +
+  scale_x_continuous(expand = c(0.01, 0)) +
+  theme(legend.position = "bottom",
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.title = element_blank())
+})
+
+```
+
+
+Row
+--------------------
+### Gender
+```{r}
+plotOutput("hist_g2")
+```
+
+### Race
+```{r}
+plotOutput("hist_r2")
+```
+
+### Ethnicity
+```{r}
+plotOutput("hist_e2")
+```
+
+```{r barplots_all_in_one, context = "server"}
+output$hist_g2 <- renderPlot({
+
+    anatomy_plot_2(demo, input$anat2, "gender")
+    
+    })
+
+output$hist_r2 <- renderPlot({
+
+    anatomy_plot_2(demo, input$anat2, "race")
+    
+    })
+
+output$hist_e2 <- renderPlot({
+
+    anatomy_plot_2(demo, input$anat2, "ethnicity")
+    
+    })
+```
+
+Survival analysis {}
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+### Case history
+
+```{r}
+selectInput(
+  inputId = "Survivalcase",
+  label = "Choose the case history:",
+  choices <- list("Gender" = "tcga.cgc_case_gender",
+             "Ethnicity" = "tcga.xml_ethnicity",
+             "Smoking history" = "tcga.xml_tobacco_smoking_history",
+             "Neoadjuvant treatment" = "tcga.xml_history_of_neoadjuvant_treatment",
+             "Alcohol history" = "tcga.gdc_cases.exposures.alcohol_history"),
+  selected = "tcga.cgc_case_gender"
+  )
+```
+
+### RNA-seq features selection
+
+```{r}
+selectInput(
+  inputId = "Survivalfeatures",
+  label = "Choose the features:",
+  choices <- list("Cancer status" = "person_neoplasm_cancer_status",
+             "RNA subtype" = "RNA"),
+  selected = "person_neoplasm_cancer_status"
+  )
+```
+
+Row {.tabset}
+---------------------
+
+### Overview
+```{r}
+plotOutput("survival_over")
+```
+
+```{r survival_over, context = "server"}
+output$survival_over <- 
+    renderPlot({
+      clinical_data <- clinical %>% filter(!is.na(days_to_death))
+      surv <- survfit(Surv(days_to_death, vital_status) ~ 1, data = clinical_data)
+      autoplot(surv) + scale_color_brewer(palette = "Set1") + scale_fill_brewer(palette = "Set1") +
+      xlab('Survial Time (Days)') + ylab('Survival Probabilities') +
+      theme(axis.line = element_line(linetype = 1,colour = 'black'), text = element_text(size=14),
+                       panel.background = element_rect(I(0)), axis.text = element_text(size = 14),
+                       panel.grid.major = element_line(colour = "#666666", linetype = 'dashed'),
+                       panel.grid.minor = element_line(colour = NA))
+    })
+```
+
+### Case history
+```{r}
+plotOutput("survival_history")
+```
+
+```{r survival_history, context = "server"}
+output$survival_history <- 
+    renderPlot({
+      clinical_data <- clinical %>% filter(!is.na(days_to_death)) %>%
+                                    filter(input$Survivalcase != '' & !is.na(input$Survivalcase))
+      modform <- as.formula(paste("Surv(days_to_death, vital_status)",
+                                  input$Survivalcase, sep = " ~ "))
+      surv <- survfit(modform, data = clinical_data)
+      surv$call$formula <- modform
+      surv$call$data <- clinical_data
+      pvaltext = surv_pvalue(surv)$pval.txt
+      autoplot(surv) + scale_color_brewer(palette = "Set1") + scale_fill_brewer(palette = "Set1") +
+      xlab('Survial Time (Days)') + ylab('Survival Probabilities') +
+      geom_text(x=600,y=0.1,label=pvaltext, size =5) +
+      theme(axis.line = element_line(linetype = 1,colour = 'black'), text = element_text(size=14),
+                       panel.background = element_rect(I(0)), axis.text = element_text(size = 14),
+                       panel.grid.major = element_line(colour = "#666666", linetype = 'dashed'),
+                       panel.grid.minor = element_line(colour = NA))
+    })
+```
+
+### RNA-seq features
+```{r}
+plotOutput("survival_features")
+```
+
+```{r survival_features, context = "server"}
+output$survival_features <- 
+    renderPlot({
+      clinical_data <- clinical_maf %>% filter(!is.na(days_to_death)) %>%
+                                    filter(input$Survivalfeatures != '' &
+                                           !is.na(input$Survivalfeatures))
+      modform <- as.formula(paste("Surv(days_to_death, vital_status)",
+                                  input$Survivalfeatures, sep = " ~ "))
+      
+      surv <- survfit(modform, data = clinical_data)
+      surv$call$formula <- modform
+      surv$call$data <- clinical_data
+      pvaltext = surv_pvalue(surv)$pval.txt
+      autoplot(surv) + scale_color_brewer(palette = "Set1") + scale_fill_brewer(palette = "Set1") +
+      xlab('Survial Time (Days)') + ylab('Survival Probabilities') +
+      geom_text(x=600,y=0.1,label=pvaltext, size =5) +
+      theme(axis.line = element_line(linetype = 1,colour = 'black'), text = element_text(size=14),
+                       panel.background = element_rect(I(0)), axis.text = element_text(size = 14),
+                       panel.grid.major = element_line(colour = "#666666", linetype = 'dashed'),
+                       panel.grid.minor = element_line(colour = NA))
+    })
+```
+
+Gene expression {}
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+### NMF clustering
+
+```{r}
+selectInput(
+  inputId = "K_of_NMF",
+  label = "Choose the number of cluster :",
+  choices <- list("K = 3" = "NMF_3",
+                  "K = 4" = "NMF_4",
+                  "K = 5" = "NMF_5",
+                  "K = 6" = "NMF_6",
+                  "K = 7" = "NMF_7",
+                  "K = 8" = "NMF_8",
+                  "K = 9" = "NMF_9",
+                  "K = 10" = "NMF_10"),
+  selected = "NMF_4"
+  )
+```
+
+### Statistics seting
+
+```{r}
+radioButtons(
+  inputId = "expression_grouping",
+  label = "Select the factor",
+  choices = list("Cancer status" = "person_neoplasm_cancer_status",
+                 "Cancer stage" = "tcga.cgc_case_clinical_stage",
+                 "RNA subtype" = "RNA",
+                 "NMF clustering" = "NMF_grouping"),
+  selected = "person_neoplasm_cancer_status"
+)
+```
+
+```{r}
+selectInput(
+  inputId = "statistic_method",
+  label = "Select the statistical method",
+  choices = list("ANOVA" = "ANOVA",
+  "Welch’s ANOVA" = "WelchANOVA",
+  "Kruskal-Wallis" = "Kruskal"),
+  selected = "Kruskal"
+)
+```
+
+```{r}
+selectInput(
+  inputId = "post_hoc_method",
+  label = "Select the Post-hoc tests method",
+  choices = list("Games-Howell post-hoc test" = "Games",
+            "Tukey-Kramer post-hoc test" = "Tukey",
+            "Mann Whitney U test" = "Mann_Whitney"),
+  selected = "Mann_Whitney"
+)
+```
+
+```{r}
+numericInput(
+  "statistic_p_cut",
+  "adjusted p-value Threshold",
+  0.05, min = 0.0001, max = 0.05
+)
+```
+
+### Survival test
+
+```{r}
+textInput(
+  "Selected_gene",
+  "Select the gene",
+  value = "ENSG00000278704.1"
+)
+```
+
+Row {.tabset}
+---------------------
+
+### Overview
+
+```{r}
+scale2 <- function(mat, ...) {
+  t(scale(t(mat), ...))
+}
+ha <-
+  sample_sheet %>% 
+  select(sample_id, `Sample type` = tcga.cgc_sample_sample_type) %>%
+  column_to_rownames("sample_id") %>%
+  HeatmapAnnotation(df = .)
+
+ht2 <-
+  Heatmap(scale2(normalized_counts[row_var > quantile(row_var, 0.995),]),
+        show_row_names = FALSE, show_column_names = FALSE,
+        clustering_distance_rows = "pearson", name = "gene expression",
+        col = viridis::viridis(100), top_annotation = ha)
+
+ht2
+```
+
+### NMF clustering
+```{r echo=FALSE}
+plotOutput("NMF_PCA")
+```
+
+### NMF and subtype
+```{r echo=FALSE}
+plotOutput("chordSubtype")
+```
+
+### NMF and stage
+```{r echo=FALSE}
+plotOutput("chord_clinical_Stage")
+```
+
+### Survival analysis with NMF
+```{r echo=FALSE}
+plotOutput("sur_NMF")
+```
+
+### Statistic result
+```{r echo=FALSE}
+plotOutput("plot_statistic_table")
+```
+
+### Statistic table
+```{r echo=FALSE}
+DT::dataTableOutput("show_statistic_table")
+```
+
+### Survival test in single gene
+```{r echo=FALSE}
+plotOutput("plot_sur_statistic_gene")
+```
+
+```{r pca, message = FALSE, warning = FALSE, context = "server"}
+output$NMF_PCA <- 
+    renderPlot({
+    NMF_result <- selectK(input$K_of_NMF)
+    top2_pca.data$NMF_group <- paste0("NMF_",NMF_result$group)
+    top2_pca.data$NMF_group <- factor(top2_pca.data$NMF_group, sort(unique(top2_pca.data$NMF_group)))
+    ggPCA <- ggplot(top2_pca.data,aes(x=PC1,y=PC2,color=NMF_group))+
+             geom_point() + labs(x = paste0("PC1 (",round(pcaprops[1]*100,2), "% var. explained)"),
+                                 y = paste0("PC2 (",round(pcaprops[2]*100,2), "% var. explained)"),
+                                 color='NMF Group') + theme_bw() + ggtitle('NMF clustering')
+    ggPCA
+  })
+```
+
+```{r chordDiagram, context = "server"}
+output$chordSubtype <- 
+    renderPlot({
+      NMF_result <- selectK(input$K_of_NMF)
+      RNA_subtype <- clinical_maf$tcga.gdc_cases.case_id
+      names(RNA_subtype) <- as.character(clinical_maf$RNA)
+      NMF_group_subtype <-  clinical_maf$tcga.gdc_cases.case_id
+      names(NMF_group_subtype) <- paste0("NMF_",NMF_result$group)[colnames(normalized_counts) %in%    clinical_maf$sample_id]
+      lntable <- data.frame()
+      lntable[1:length(unique(names(RNA_subtype))),1:length(unique(names(NMF_group_subtype)))] <- 0
+      rownames(lntable) <- unique(names(RNA_subtype))
+      colnames(lntable) <- unique(names(NMF_group_subtype))
+      for(i in 1:nrow(lntable)){
+        for(j in 1:ncol(lntable)){
+          tag1 <- unique(names(RNA_subtype))[i]
+          tag2 <- unique(names(NMF_group_subtype))[j]
+          ilist <- RNA_subtype[names(RNA_subtype) == tag1]
+          jlist <- NMF_group_subtype[names(NMF_group_subtype) == tag2]
+          lntable[i,j] <- length(intersect(ilist, jlist))
+        }
+      }
+      chordSubtype <- as.matrix(t(lntable)) %>% chordDiagram()
+      chordSubtype
+    })
+``` 
+
+```{r chord_stage, context = "server"}
+output$chord_clinical_Stage <- 
+    renderPlot({
+      NMF_result <- selectK(input$K_of_NMF)
+      clinical_Stage <- clinical_maf$tcga.gdc_cases.case_id
+      names(clinical_Stage) <- as.character(clinical_maf$tcga.cgc_case_clinical_stage)
+      NMF_group_subtype <-  clinical_maf$tcga.gdc_cases.case_id
+      names(NMF_group_subtype) <- paste0("NMF_",NMF_result$group)[colnames(normalized_counts) %in%    clinical_maf$sample_id]
+      lntable <- data.frame()
+      lntable[1:length(unique(names(clinical_Stage))),1:length(unique(names(NMF_group_subtype)))] <- 0
+      rownames(lntable) <- unique(names(clinical_Stage))
+      colnames(lntable) <- unique(names(NMF_group_subtype))
+      for(i in 1:nrow(lntable)){
+        for(j in 1:ncol(lntable)){
+          tag1 <- unique(names(clinical_Stage))[i]
+          tag2 <- unique(names(NMF_group_subtype))[j]
+          ilist <- clinical_Stage[names(clinical_Stage) == tag1]
+          jlist <- NMF_group_subtype[names(NMF_group_subtype) == tag2]
+          lntable[i,j] <- length(intersect(ilist, jlist))
+        }
+      }
+      chordSubtype <- as.matrix(t(lntable)) %>% chordDiagram()
+      chordSubtype
+    })
+``` 
+
+```{r sur_NMF, context = "server"}
+output$sur_NMF <- 
+    renderPlot({
+      NMF_result <- selectK(input$K_of_NMF)
+      clinical_data <- clinical_maf
+      clinical_data$NMF_group <- paste0("NMF_",NMF_result$group)[colnames(normalized_counts) %in%    clinical_maf$sample_id]
+      clinical_data <- clinical_data %>% filter(!is.na(days_to_death))
+      modform <- as.formula("Surv(days_to_death, vital_status) ~ NMF_group")
+      surv <- survfit(modform, data = clinical_data)
+      surv$call$formula <- modform
+      surv$call$data <- clinical_data
+      pvaltext = surv_pvalue(surv)$pval.txt
+      autoplot(surv) + scale_color_brewer(palette = "Set1") + scale_fill_brewer(palette = "Set1") +
+          xlab('Survial Time (Days)') + ylab('Survival Probabilities') +
+          geom_text(x=4000,y=0.7,label=pvaltext, size =6) +
+          theme(axis.line = element_line(linetype = 1,colour = 'black'), text = element_text(size=14),
+              panel.background = element_rect(I(0)), axis.text = element_text(size = 14),
+              panel.grid.major = element_line(colour = "#666666", linetype = 'dashed'),
+              panel.grid.minor = element_line(colour = NA))
+    })
+```      
+
+```{r doing_statistics, context = "server"}
+exp_statistics_table <- reactive({
+  expdata <- t(data1[,clinical_maf$sample_id])
+  NMF_result <- selectK(input$K_of_NMF)
+  clinical_maf$NMF_grouping <- paste0("NMF_",NMF_result$group)[colnames(normalized_counts) %in%    clinical_maf$sample_id]
+  
+  
+fv <- clinical_maf[, input$expression_grouping]
+  expdata <- expdata[!is.na(fv),]
+  fv <- fv[!is.na(fv)]
+  if(input$statistic_method == "ANOVA"){
+      H_testtable <- ANOVA_f(expdata, fv)
+    } else if(input$statistic_method == "WelchANOVA"){
+      H_testtable <- Welch_ANOVA_f(expdata, fv)
+    } else if(input$statistic_method == "Kruskal"){
+      H_testtable <- Kruskal_Wallis_h(expdata, fv)
+    }
+    if(input$post_hoc_method == "Games"){
+      post_testtable <- post_hoc_Games(expdata, H_testtable, "none", input$statistic_p_cut, fv)
+    } else if(input$post_hoc_method == "Tukey"){
+      post_testtable <- post_hoc_Tukey(expdata, H_testtable, "none", input$statistic_p_cut, fv)
+    } else if(input$post_hoc_method == "Mann_Whitney"){
+      post_testtable <- post_hoc_Mann_Whitney(expdata, H_testtable, "none", input$statistic_p_cut, fv)
+    }
+    if(nrow(post_testtable) == 0){
+      post_testtable
+    }
+    post_testtable[,3:6] <- round(post_testtable[,3:6], 4)
+    rownames(post_testtable) <- NULL
+    post_testtable
+})
+```
+
+```{r show_statistics_table, context = "server"}
+output$show_statistic_table <- DT::renderDataTable({
+    statistic_table <- exp_statistics_table()
+    statistic_table <- statistic_table[,1:6]
+    statistic_table
+  })
+```
+
+```{r plot_statistics_table, context = "server"}
+output$plot_statistic_table <- renderPlot({
+    expdata <- t(data1[,clinical_maf$sample_id])
+    NMF_result <- selectK(input$K_of_NMF)
+    clinical_maf$NMF_grouping <- paste0("NMF_",NMF_result$group)[colnames(normalized_counts) %in%    clinical_maf$sample_id]
+    
+    fv <- clinical_maf[, input$expression_grouping]
+    expdata <- expdata[!is.na(fv),]
+    fv <- fv[!is.na(fv)]
+  
+    post_test <- exp_statistics_table()
+    merged_bar <- plot_3bar_moregroup(post_test, expdata, fv, expdata)
+    merged_bar
+  })
+```
+
+```{r plot_sur_statistics_gene, context = "server"}
+output$plot_sur_statistic_gene <- renderPlot({
+    clinical_data <- clinical_maf
+    expdata <- normalized_counts[,colnames(normalized_counts) %in% clinical_maf$sample_id]
+    cutpoint <- median(expdata[input$Selected_gene,])
+    clinical_data$genetest <- ifelse(expdata[input$Selected_gene,] > cutpoint, "higher","lower")
+    clinical_data <- clinical_data %>% filter(!is.na(days_to_death)) %>% filter(!is.na(genetest))
+    modform <- as.formula("Surv(days_to_death, vital_status) ~ genetest")
+    surv <- survfit(modform, data = clinical_data)
+    surv$call$formula <- modform
+    surv$call$data <- clinical_data
+    pvaltext = surv_pvalue(surv)$pval.txt
+    genenames = input$Selected_gene
+    geneup = paste0(c("Higher [N= ",length(clinical_data$genetest == "higher") ,"]"), collapse = "")
+    genedown = paste0(c("Lower [N= ",length(clinical_data$genetest == "lower") ,"]"), collapse = "")
+    autoplot(surv) + scale_color_brewer(palette = "Set1") + scale_fill_brewer(palette = "Set1") +
+        xlab('Survial Time (Days)') + ylab('Survival Probabilities') +
+        geom_text(x=4000,y=0.75,label=genenames, size = 6) +
+        geom_text(x=4000,y=0.7,label=geneup, size = 6) +
+        geom_text(x=4000,y=0.65,label=genedown, size = 6) +
+        geom_text(x=4000,y=0.6,label=pvaltext, size = 6) +
+        theme(axis.line = element_line(linetype = 1,colour = 'black'), text = element_text(size=14),
+              panel.background = element_rect(I(0)), axis.text = element_text(size = 14),
+              panel.grid.major = element_line(colour = "#666666", linetype = 'dashed'),
+              panel.grid.minor = element_line(colour = NA))
+  })
+```
+
+Somatic Mutation Analysis {}
+===================================== 
+
+Inputs {.sidebar}
+-------------------------------------
+
+### Targeted Gene 
+```{r}
+checkboxGroupInput(
+  inputId = "Lollipop_tagret_gene",
+  label = "Please select your targeted gene(s):",
+  choices = unique(maf@gene.summary$Hugo_Symbol[1:10]),
+  selected = "TP53"
+  )
+```
+
+Row {.tabset}
+---------------------
+### Summary
+```{r, context = "data"}
+tryCatch(maf <- tcgaLoad(study = "HNSC"), 
+         error = function(e) {
+           print(paste(rep("#", 50), collapse = ""))
+           print(paste0("# ERROR! Read the message below!", 
+                        paste(rep(" ", 17), collapse = ""),
+                        "#"))
+           print(paste(rep("#", 50), collapse = ""))
+           print(e)
+           print(paste("If you're seeing this message you probably don't have",
+                       "maftools package loaded, or have an older version.", 
+                       "This function is available with v2.8.",
+                       "Install the new version of maftools package with",
+                       "`BiocManager::install('PoisonAlien/maftools')`", 
+                       "and try again!"))
+           })
+```
+
+```{r}
+plotmafSummary(maf = maf, rmOutlier = TRUE, 
+               addStat = 'median', dashboard = TRUE, log_scale = FALSE)
+
+```
+
+### Oncoplot
+```{r}
+oncoplot(maf = maf, top = 10)
+```
+
+### Transition and tranversion
+```{r}
+maf.titv = titv(maf = maf, plot = FALSE, useSyn = TRUE)
+
+#plot titv summary
+plotTiTv(res = maf.titv)
+```
+
+### Lollipop
+```{r}
+plotOutput("Lollipop")
+```
+
+```{r Lollipop_plot, context = "server"}
+output$Lollipop <- 
+      renderPlot({
+          top_label <-
+          maf@data %>%
+          filter(Hugo_Symbol == input$Lollipop_tagret_gene) %>%
+          group_by(HGVSp_Short) %>%
+          summarise(count = n()) %>%
+          top_n(5) %>%
+          pull(HGVSp_Short) %>%
+          str_extract("[0-9]+")
+                
+          lollipopPlot(
+          maf = maf,
+          gene = input$Lollipop_tagret_gene, labelPos = top_label, labPosAngle = 10, labPosSize = 1.0, legendTxtSize = 1.2, titleSize = c(1.5, 1.2))
+      })
+```
+
+### Mutation load against TCGA cohorts
+```{r}
+maf.mutload = tcgaCompare(maf = maf, cohortName = 'Example-HNSC', logscale = TRUE, capture_size = 50)
+```
+
+### Somatic Interactions
+```{r}
+temp <- somaticInteractions(maf, top = 15, pvalue = c(0.01, 0.05))
+```
+
+### Drug-Gene Interactions
+```{r}
+plotOutput("dgi_plot")
+```
+
+```{r dgi_plot, context = "server"}
+output$dgi_plot <- 
+      renderPlot({
+        dgi = drugInteractions(maf = maf, fontSize = 0.75)
+        x.dgi = drugInteractions(genes = input$Lollipop_tagret_gene, drugs = TRUE)
+        x.dgi[,.(Gene, interaction_types, drug_name, drug_claim_name)]
+})
+```
+
+### Oncogenic Signaling Pathways
+```{r}
+temp1 <- OncogenicPathways(maf=maf)
+
+PlotOncogenicPathways(maf = maf, pathways = "TP53")
+```
