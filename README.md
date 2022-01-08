@@ -20,7 +20,7 @@ Head and Neck Squamous Cell Carcinoma (HNSC)
 * [Kasia Kedzierska](https://github.com/kzkedzierska), University of Oxford, UK
 
 ## Team members
-* Evgenia Chikina, ITMO University, Russia 
+* [Evgenia Chikina](https://github.com/JaneChik), ITMO University, Russia 
 * [Yin-Cheng Chen](https://github.com/YinchengChen23), Chang Gung University, Taiwan
 * [Li Chuin Chong](https://www.linkedin.com/in/lichuinchong/), Bezmialem Vakif University, Turkey
 * Yan-Han Fang, National Cheng Kung University, Taiwan
